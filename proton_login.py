@@ -18,6 +18,8 @@ OTP = 'input#twoFa, input#otp, input[name="twoFa"], input[name="otp"], input[aut
 ERRORS = '[role="alert"], .text-danger, .error-message, .notification--error, .field-error'
 SUBMIT = 'button[type="submit"], input[type="submit"]'
 ACCOUNT_NAV = 'a[href*="/downloads"], a[href*="/dashboard"], a[href="/logout"], button[data-testid="user-dropdown:button"]'
+VERIFICATION_UI = '[role="dialog"], dialog[open], h1, h2, h3'
+VERIFICATION_FRAME = 'iframe[src*="verify.proton.me"], iframe[title*="captcha"], iframe[title*="CAPTCHA"]'
 TRUSTED_HOSTS = {"account.protonvpn.com", "account.proton.me"}
 
 
@@ -28,6 +30,15 @@ class LoginFailure(Exception):
 
 
 class ProtonLoginMixin:
+    def _human_verification_visible(self, body_text):
+        phrases = ("verify you are human", "human verification", "complete the captcha")
+        for element in self.driver.find_elements(By.CSS_SELECTOR, VERIFICATION_UI):
+            if element.is_displayed() and any(p in element.text.lower() for p in phrases):
+                return True
+        # Do not interpret a help/footer mention of "human verification" as
+        # a blocking challenge. The fallback requires an explicit instruction.
+        return any(p in body_text for p in ("verify you are human", "complete the captcha"))
+
     def _visible(self, selector, scope=None, enabled=False):
         for element in (scope or self.driver).find_elements(By.CSS_SELECTOR, selector):
             try:
@@ -68,8 +79,8 @@ class ProtonLoginMixin:
         # redirect too, and the SPA can leave /login in the URL while updating.
         bodies = self.driver.find_elements(By.TAG_NAME, "body")
         text = bodies[0].text.lower() if bodies else ""
-        if any(phrase in text for phrase in ("verify you are human", "human verification", "complete the captcha")):
-            return "challenge", LoginFailure("human_verification", "Proton requires human verification. An unattended GitHub runner cannot complete this challenge; use a runner where normal sign-in succeeds.")
+        if self._human_verification_visible(text):
+            return "challenge", LoginFailure("human_verification", "Proton's human-verification prompt is still present. Complete it in a local headed browser, or use a runner where normal sign-in succeeds. The script does not solve interactive CAPTCHA challenges.")
         if any(phrase in text for phrase in ("code sent to your email", "check your email for", "verification email")):
             return "challenge", LoginFailure("email_verification", "Proton requires email verification, which this unattended login cannot complete.")
 
@@ -91,16 +102,36 @@ class ProtonLoginMixin:
             return "authenticated", None
         if password:
             return "password", password
+        if user:
+            return "username", user
         return "pending", None
 
     def _wait_login_state(self, accepted):
+        verification_started = None
+        active_verification = None
         def poll(_):
+            nonlocal verification_started, active_verification
             state = self._login_state()
+            if state[0] == "challenge" and state[1].code == "human_verification":
+                active_verification = state[1]
+                if verification_started is None:
+                    verification_started = time.monotonic()
+                    print(f"Human verification is visible. Waiting up to {self._verification_timeout}s for it to complete; in a headed local browser, complete the prompt yourself.")
+                if time.monotonic() - verification_started >= self._verification_timeout:
+                    raise active_verification
+                return False
+            verification_started = None
+            active_verification = None
             return state if state[0] in accepted | {"error", "challenge"} else False
-        state, detail = WebDriverWait(
-            self.driver, self._login_timeout, poll_frequency=0.5,
-            ignored_exceptions=(StaleElementReferenceException,),
-        ).until(poll)
+        try:
+            state, detail = WebDriverWait(
+                self.driver, max(self._login_timeout, self._verification_timeout), poll_frequency=0.5,
+                ignored_exceptions=(StaleElementReferenceException,),
+            ).until(poll)
+        except TimeoutException:
+            if active_verification is not None:
+                raise active_verification from None
+            raise
         if state in {"error", "challenge"}:
             raise detail
         return state, detail
@@ -124,13 +155,16 @@ class ProtonLoginMixin:
     def _save_login_diagnostics(self, code):
         # Only status flags are persisted: no DOM, screenshots, field values,
         # cookies, URL query strings, usernames, passwords, or OTPs.
-        report = {"failure_code": code, "timeout_seconds": self._login_timeout}
+        report = {"failure_code": code, "timeout_seconds": self._login_timeout,
+                  "verification_timeout_seconds": self._verification_timeout,
+                  "headless": os.environ.get("PROTON_HEADLESS", "true").lower() != "false"}
         try:
             report.update({
                 "username_field_visible": self._visible(USERNAME) is not None,
                 "password_field_visible": self._visible(PASSWORD) is not None,
                 "otp_field_visible": self._visible(OTP) is not None,
                 "alert_visible": self._visible(ERRORS) is not None,
+                "verification_frame_visible": self._visible(VERIFICATION_FRAME) is not None,
             })
             target = Path("debug/login-status.json")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -141,14 +175,18 @@ class ProtonLoginMixin:
 
     def login(self, username, password):
         self._login_timeout = 120
+        self._verification_timeout = 60
         self.last_login_failure = None
         try:
             self._login_timeout = int(os.environ.get("LOGIN_TIMEOUT_SECONDS", "120"))
+            self._verification_timeout = int(os.environ.get("HUMAN_VERIFICATION_TIMEOUT_SECONDS", "60"))
             if not 30 <= self._login_timeout <= 600:
+                raise ValueError
+            if not 5 <= self._verification_timeout <= 600:
                 raise ValueError
         except ValueError:
             self.last_login_failure = "invalid_timeout"
-            print("LOGIN_TIMEOUT_SECONDS must be an integer between 30 and 600.")
+            print("LOGIN_TIMEOUT_SECONDS must be between 30 and 600; HUMAN_VERIFICATION_TIMEOUT_SECONDS must be between 5 and 600 (integer seconds).")
             return False
         try:
             if not username or not username.strip() or not password:
@@ -157,12 +195,8 @@ class ProtonLoginMixin:
             # wait used elsewhere in the original downloader.
             self.driver.implicitly_wait(0)
             self.driver.get("https://account.protonvpn.com/login?language=en")
-            def initial_form(_):
-                state, detail = self._login_state()
-                if state in {"error", "challenge"}:
-                    raise detail
-                return self._visible(USERNAME, enabled=True)
-            user = WebDriverWait(self.driver, self._login_timeout).until(initial_form)
+            self._wait_login_state({"username", "password"})
+            user = WebDriverWait(self.driver, self._login_timeout).until(lambda _: self._visible(USERNAME, enabled=True))
             self._fill_login_field(user, username.strip())
             password_field = self._visible(PASSWORD)
             if password_field is None:

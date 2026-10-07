@@ -43,7 +43,7 @@ Replace `OWNER` and `REPOSITORY` with your repository details. A private reposit
 
 Release publication uses the built-in `GITHUB_TOKEN`. No personal access token is required. The release job requests `contents: write`; repository or organization policies must permit that permission.
 
-The browser downloader handles both combined username/password forms and username-first forms. It waits up to 120 seconds per login stage for visible page state instead of rejecting a login after a fixed three-second delay. Authenticator two-factor authentication is supported with `VPN_TOTP_SECRET`. Interactive CAPTCHA, email verification, and security key prompts still require user interaction and cannot be completed by this unattended workflow. Available servers depend on your account and plan.
+The browser downloader handles both combined username/password forms and username-first forms. It waits for visible page state instead of rejecting a login after a fixed three-second delay. The normal login timeout is 120 seconds; a human-verification prompt gets a separate bounded wait, defaulting to 60 seconds. Authenticator two-factor authentication is supported with `VPN_TOTP_SECRET`. Interactive CAPTCHA, email verification, and security key prompts still require user interaction. Available servers depend on your account and plan.
 
 ### Troubleshooting login failures
 
@@ -69,6 +69,40 @@ On failure, the workflow uploads a `login-status` artifact with only status flag
 
 Increasing the timeout cannot repair rejected credentials or satisfy interactive verification. The release job remains blocked until login and fresh downloads succeed.
 
+### When Proton asks for human verification
+
+`human_verification` means the script detected a visible verification prompt. It does not establish that your password is incorrect. Network reputation can affect Proton's verification requirements. A runner on your normal home internet connection may receive fewer challenges, but moving runners does not guarantee unattended login.
+
+The downloader now waits for a prompt to disappear instead of immediately aborting. It also distinguishes an active heading/dialog from a generic help-text mention of human verification. It does not click through or solve a CAPTCHA. If the prompt remains, the workflow stops with the same failure code.
+
+For fresh downloads using your own network:
+
+1. Open **Settings > Actions > Runners > New self-hosted runner** in your repository.
+2. Choose **Linux / x64** and follow GitHub's displayed registration commands on a Linux machine you control. Run the runner under a dedicated non-root user.
+3. Add the custom label **`protonvpn`**. The downloader selects the labels `self-hosted`, `linux`, `x64`, and `protonvpn` together.
+4. Install Google Chrome / Chromium and its runtime dependencies on that machine. Check normal account sign-in from that machine's network.
+5. Run **Download WireGuard and Publish Release** and select **runner: `self-hosted`**.
+6. For scheduled downloads, add the repository variable **`DOWNLOAD_RUNNER=self-hosted`**. Leave it unset to keep scheduled downloads on GitHub-hosted runners.
+
+Only the browser download job moves to your runner. Conversion, validation, and release publication stay on GitHub-hosted runners. Do not expose your runner to untrusted workflows or pull requests.
+
+If you need to complete the prompt yourself, run the downloader in a graphical session on your own machine:
+
+```bash
+# Set VPN_USERNAME and VPN_PASSWORD privately in this shell first.
+export PROTON_HEADLESS=false
+export HUMAN_VERIFICATION_TIMEOUT_SECONDS=300
+python proton_downloader_chrome.py
+```
+
+Complete the verification in the Chrome window opened by this command. The script waits on that same page and continues after the prompt is resolved. On Linux this requires a real graphical session, accessible directly or through a remote desktop. A terminal-only LXC or an invisible virtual display does not provide a way to interact with the prompt. Verification may be requested again during later browser sessions.
+
+For an attended self-hosted Actions run, repository variables `PROTON_HEADLESS=false`, `PROTON_DISPLAY=:0` (replace with your accessible display), and `HUMAN_VERIFICATION_TIMEOUT_SECONDS=300` enable the same behavior. The runner user must have permission to open windows in that session. Do not set headed mode on a GitHub-hosted runner.
+
+To publish OpenClash and WireGuard assets immediately without a new Proton login, run **Generate OpenClash and Publish Release** with **input_source: `repository`**. This builds from the ZIP already in the selected branch and does not refresh its VPN keys or servers. You can also download configs manually in your browser, replace `ProtonVPN_WireGuard_Configs.zip` in the repository, and run that workflow to generate and release both formats.
+
+The `punycode` / `url.parse()` deprecation warnings printed by the artifact uploader are separate from Proton login. If the log says the artifact was successfully uploaded, those warnings did not prevent diagnostic upload. A successful diagnostic upload does not make the failed download job successful.
+
 ## GitHub Actions
 
 ### Download WireGuard and Publish Release
@@ -79,7 +113,7 @@ Runs daily at **00:00 UTC / 07:00 Asia/Jakarta**, or manually. Scheduled workflo
 
 The workflow:
 
-1. Removes the checked-in ZIP and checkpoint from the runner so an old archive cannot be mistaken for a fresh download.
+1. Selects a GitHub-hosted or registered self-hosted runner for the browser download job, then removes the checked-in ZIP and checkpoint from that job's checkout so an old archive cannot be mistaken for a fresh download.
 2. Downloads WireGuard files using `proton_downloader_chrome.py` and creates a country-organized ZIP. Server IDs are recorded after a completed browser download.
 3. Passes the fresh ZIP to the reusable OpenClash workflow as an artifact.
 4. Generates `config.yaml`, tests the converter, and validates the YAML using the current stable Mihomo core.
@@ -104,7 +138,7 @@ Both modes generate the OpenClash configuration and include that same WireGuard 
 
 Workflow file: `.github/workflows/test.yml`.
 
-Runs converter tests and simulated browser login tests on relevant pushes and pull requests. Tests cover combined and two-step forms, slow login, 2FA, rejected credentials, challenges, and diagnostic privacy. They do not log in to ProtonVPN or publish a release.
+Runs converter tests and simulated browser login tests on relevant pushes and pull requests. Tests cover combined and two-step forms, slow login, 2FA, rejected credentials, transient/persistent verification prompts, headed Chrome options, and diagnostic privacy. They do not log in to ProtonVPN or publish a release.
 
 ## OpenClash usage
 
@@ -172,3 +206,5 @@ Both `config.yaml` and the `.conf` files contain WireGuard private keys. Publish
 - [Mihomo WireGuard configuration](https://wiki.metacubex.one/en/config/proxies/wg/)
 - [Mihomo load-balance groups](https://wiki.metacubex.one/en/config/proxy-groups/load-balance/)
 - [OpenClash project](https://github.com/vernesong/OpenClash)
+- [Proton network-related login checks](https://proton.me/support/log-in-temporarily-blocked)
+- [Using GitHub self-hosted runners](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow)

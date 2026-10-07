@@ -11,6 +11,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 
 import proton_login as module
+from proton_downloader_chrome import ProtonVPN
 
 
 class Element:
@@ -54,6 +55,9 @@ class Driver:
         self.values, self.submissions, self.waits = {}, [], []
         self.ticks = 0
         self.max_pending_ticks = 0
+        self.body_notice = ""
+        self.resolve_verification = False
+        self.verification_target = "authenticated"
 
     def get(self, url):
         self.current_url = url
@@ -63,6 +67,11 @@ class Driver:
         self.waits.append(value)
 
     def tick(self):
+        if self.stage == "challenge" and self.resolve_verification:
+            self.ticks += 1
+            if self.ticks >= 18:
+                self.stage = self.verification_target
+            return
         if self.stage in {"password_wait", "otp_wait", "no_nav"}:
             self.ticks += 1
             self.max_pending_ticks = max(self.max_pending_ticks, self.ticks)
@@ -73,8 +82,10 @@ class Driver:
 
     def find_elements(self, by, selector):
         if by == By.TAG_NAME:
-            text = "Verify you are human" if self.stage == "challenge" else ""
+            text = "Verify you are human" if self.stage == "challenge" else self.body_notice
             return [Element(self, "body", text=text)]
+        if selector == module.VERIFICATION_UI:
+            return [Element(self, "heading", text="Human verification")] if self.stage == "challenge" else []
         if selector == module.USERNAME:
             return [Element(self, "username")] if self.stage in {"username", "combined", "password_wait"} else []
         if selector == module.PASSWORD:
@@ -120,7 +131,8 @@ class LoginTests(unittest.TestCase):
         self.previous_dir = os.getcwd()
         os.chdir(self.temp.name)
         self.addCleanup(os.chdir, self.previous_dir)
-        self.env = patch.dict(os.environ, {"LOGIN_TIMEOUT_SECONDS": "120", "VPN_TOTP_SECRET": ""})
+        self.env = patch.dict(os.environ, {"LOGIN_TIMEOUT_SECONDS": "120", "VPN_TOTP_SECRET": "",
+                                          "HUMAN_VERIFICATION_TIMEOUT_SECONDS": "60", "PROTON_HEADLESS": "true"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.wait = patch.object(module, "WebDriverWait", Wait)
@@ -185,6 +197,53 @@ class LoginTests(unittest.TestCase):
         client, result = self.run_login(Driver(outcome="challenge"))
         self.assertFalse(result)
         self.assertEqual(client.last_login_failure, "human_verification")
+
+    def test_transient_verification_can_finish_without_resubmitting_credentials(self):
+        driver = Driver(outcome="challenge")
+        driver.resolve_verification = True
+        _, result = self.run_login(driver)
+        self.assertTrue(result)
+        self.assertEqual(len(driver.submissions), 1)
+
+    def test_help_text_about_verification_is_not_a_challenge(self):
+        driver = Driver()
+        driver.body_notice = "Help: learn about human verification."
+        _, result = self.run_login(driver)
+        self.assertTrue(result)
+
+    def test_verification_before_username_can_complete(self):
+        driver = Driver()
+        driver.initial = "challenge"
+        driver.resolve_verification = True
+        driver.verification_target = "combined"
+        _, result = self.run_login(driver)
+        self.assertTrue(result)
+
+    def test_verification_wait_stops_at_its_deadline(self):
+        client = Client(Driver(outcome="challenge"))
+        client.driver.stage = "challenge"
+        client._login_timeout, client._verification_timeout = 120, 60
+        with patch.object(module.time, "monotonic", side_effect=[0, 0, 61]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(module.LoginFailure) as caught:
+                client._wait_login_state({"authenticated"})
+        self.assertEqual(caught.exception.code, "human_verification")
+
+    def test_chrome_is_headless_by_default(self):
+        self.assertIn("--headless=new", ProtonVPN().options.arguments)
+
+    def test_headed_chrome_uses_the_requested_display(self):
+        with patch.dict(os.environ, {"PROTON_HEADLESS": "false", "PROTON_DISPLAY": ":77"}), \
+                patch("sys.platform", "linux"):
+            options = ProtonVPN().options.arguments
+            self.assertFalse(any(arg.startswith("--headless") for arg in options))
+            self.assertEqual(os.environ["DISPLAY"], ":77")
+
+    def test_headed_chrome_requires_a_graphical_linux_session(self):
+        with patch.dict(os.environ, {"PROTON_HEADLESS": "false", "PROTON_DISPLAY": "", "DISPLAY": ""}), \
+                patch("sys.platform", "linux"):
+            with self.assertRaisesRegex(RuntimeError, "graphical session"):
+                ProtonVPN()
 
     def test_two_factor_requires_setup_key(self):
         client, result = self.run_login(Driver(outcome="otp"))

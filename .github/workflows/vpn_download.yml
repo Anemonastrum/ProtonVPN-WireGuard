@@ -3,6 +3,11 @@ name: Download WireGuard and Publish Release
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        description: Where to run the browser downloader (self-hosted requires your own registered runner)
+        type: choice
+        default: github-hosted
+        options: [github-hosted, self-hosted]
       download_scope:
         description: Download all countries or only the first country
         type: choice
@@ -29,7 +34,7 @@ concurrency:
 
 jobs:
   download:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((inputs.runner || vars.DOWNLOAD_RUNNER) == 'self-hosted' && '["self-hosted","linux","x64","protonvpn"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +50,9 @@ jobs:
           VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
           VPN_TOTP_SECRET: ${{ secrets.VPN_TOTP_SECRET }}
           LOGIN_TIMEOUT_SECONDS: ${{ vars.LOGIN_TIMEOUT_SECONDS || '120' }}
+          HUMAN_VERIFICATION_TIMEOUT_SECONDS: ${{ vars.HUMAN_VERIFICATION_TIMEOUT_SECONDS || '60' }}
+          PROTON_HEADLESS: ${{ vars.PROTON_HEADLESS || 'true' }}
+          PROTON_DISPLAY: ${{ vars.PROTON_DISPLAY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DOWNLOAD_SCOPE: ${{ inputs.download_scope || 'all' }}

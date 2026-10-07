@@ -35,7 +35,16 @@ if not os.path.exists(DOWNLOAD_DIR):
 class ProtonVPN(ProtonLoginMixin):
     def __init__(self):
         self.options = webdriver.ChromeOptions()
-        self.options.add_argument('--headless')
+        headless = os.environ.get("PROTON_HEADLESS", "true").strip().lower()
+        if headless not in {"true", "false"}:
+            raise RuntimeError("PROTON_HEADLESS must be true or false.")
+        if headless == "true":
+            self.options.add_argument('--headless=new')
+        else:
+            if os.environ.get("PROTON_DISPLAY"):
+                os.environ["DISPLAY"] = os.environ["PROTON_DISPLAY"]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                raise RuntimeError("Headed Chrome on Linux requires a graphical session. Set DISPLAY or PROTON_DISPLAY to the display you can access.")
         self.options.add_argument('--no-sandbox')
         self.options.add_argument('--disable-dev-shm-usage')
         self.options.add_argument('--disable-gpu')
@@ -312,7 +321,7 @@ class ProtonVPN(ProtonLoginMixin):
                 session += 1
                 self.setup()
                 if not self.login(username, password):
-                    raise RuntimeError("ProtonVPN login failed.")
+                    raise RuntimeError(f"ProtonVPN login failed ({self.last_login_failure}). See the login-status artifact.")
                 if not self.navigate_to_downloads():
                     raise RuntimeError("Could not open the ProtonVPN downloads page.")
                 wg_done, wg_ids = self.process_wireguard_downloads(wg_ids)
@@ -336,8 +345,12 @@ class ProtonVPN(ProtonLoginMixin):
 if __name__ == "__main__":
     U = os.environ.get("VPN_USERNAME")
     P = os.environ.get("VPN_PASSWORD")
-    if U and P: 
-        ProtonVPN().run(U, P)
+    if U and P:
+        try:
+            ProtonVPN().run(U, P)
+        except RuntimeError as error:
+            print(f"Download stopped: {error}")
+            sys.exit(1)
     else: 
         print("Missing Credentials.")
         sys.exit(1)
