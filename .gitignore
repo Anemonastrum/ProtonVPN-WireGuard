@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+downloaded_configs/
+debug/
+dist/
+config.yaml
+openclash-summary.json

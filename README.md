@@ -1,119 +1,149 @@
+# ProtonVPN WireGuard and OpenClash
 
-# ⚠️ Important Usage & Security Notice
+Download ProtonVPN WireGuard configurations, convert them into an OpenClash configuration, and publish both formats as GitHub release assets.
 
-- Public configs in this repository are intended **only for normal usage** such as browsing websites and social media.
-- Due to **high public usage and shared access**, these configs may become unstable, rate-limited, or stop working at any time.
-- For **sensitive, private, or critical activities**, you MUST:
-  - Fork this repository into your own **private GitHub repository**
-  - Use your **own ProtonVPN account**
-  - Generate configurations tied to your **own private keys**
+The generated `config.yaml` includes every valid `.conf` file in the input archive, a load-balance group for each country, a global load-balance group, and a manual server selector. It requires the **Mihomo / Clash Meta** core.
 
-Personal configs generated from your private repository have a higher connection success rate and stability compared to public shared configs.
+## Release downloads
 
----
+Open this repository's **Releases** page and download the assets from the latest release.
 
-# 🔐 Private Setup Guide (Step-by-Step)
+| Asset | Contents |
+| --- | --- |
+| `config.yaml` | Complete OpenClash configuration with WireGuard proxies and country groups |
+| `ProtonVPN_WireGuard_Configs.zip` | Original WireGuard `.conf` files organized by country code |
+| `openclash-summary.json` | Configuration counts by country, load-balance strategy, and IPv6 setting |
+| `SHA256SUMS` | SHA-256 checksums for the three files above |
 
-## 1️⃣ Fork the Repository
+The WireGuard archive is preserved as supplied to the generator. Files such as `US/wg-US-FREE-104.conf` become individual WireGuard proxies; adding a country to the ZIP automatically creates its load-balance group. Invalid configurations cause generation to fail rather than silently disappear from the output.
 
-1. Click **Fork** (top-right corner)  
-2. Set repository visibility to **Private**  
-3. Create the fork  
+For a public repository, the latest OpenClash asset can also be used as a subscription URL:
 
----
+```text
+https://github.com/OWNER/REPOSITORY/releases/latest/download/config.yaml
+```
 
-## 2️⃣ Configure Required Secrets
+Replace `OWNER` and `REPOSITORY` with your repository details. A private repository requires authenticated downloads; use a local upload if your OpenClash installation cannot authenticate.
 
-Navigate to:
+## Repository setup
 
-`Repository → Settings → Secrets and variables → Actions → New repository secret`
+1. Copy the project into a repository you control and enable GitHub Actions. To keep generated keys private, create a private repository and push a copy of the project into it; a fork of a public repository cannot be made private.
+2. Open **Settings > Secrets and variables > Actions** and create the secrets below.
+3. Open **Actions > Download WireGuard and Publish Release > Run workflow**.
+4. Select the download scope, load-balance strategy, and IPv6 setting, then run the workflow.
+5. Download both formats from **Releases** after the workflow succeeds.
 
-Add the following secrets:
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| `VPN_USERNAME` | Yes, for new downloads | ProtonVPN account username used by the existing browser login flow |
+| `VPN_PASSWORD` | Yes, for new downloads | ProtonVPN account password |
+| `TELEGRAM_BOT_TOKEN` | No | Send the downloaded WireGuard ZIP through the existing Telegram integration |
+| `TELEGRAM_CHAT_ID` | No | Telegram destination; both Telegram secrets must be set to enable delivery |
 
-- `VPN_USERNAME` → Your ProtonVPN username  
-- `VPN_PASSWORD` → Your ProtonVPN password  
+Release publication uses the built-in `GITHUB_TOKEN`. No personal access token is required. The release job requests `contents: write`; repository or organization policies must permit that permission.
 
-All secrets must be added exactly with the names above.
+The browser downloader does not implement interactive CAPTCHA or two-factor authentication. Login challenges, changes to ProtonVPN's website, and account restrictions can prevent downloads. Available servers depend on your account and plan.
 
----
+## GitHub Actions
 
-## 3️⃣ Run the GitHub Workflow
+### Download WireGuard and Publish Release
 
-1. Go to the **Actions** tab  
-2. Select the workflow  
-3. Click **Run workflow**  
-4. Start execution  
+Workflow file: `.github/workflows/vpn_download.yml`.
 
-The workflow will:
-- Log into ProtonVPN
-- Download new WireGuard configs
-- Package them into a ZIP
-- Send them to your Telegram (if configured)
+Runs daily at **00:00 UTC / 07:00 Asia/Jakarta**, or manually. Scheduled workflows run on the default branch and may start later than the scheduled time.
 
----
+The workflow:
 
-## 4️⃣ Retrieve Your Configs
+1. Removes the checked-in ZIP and checkpoint from the runner so an old archive cannot be mistaken for a fresh download.
+2. Downloads WireGuard files using `proton_downloader_chrome.py` and creates a country-organized ZIP. Server IDs are recorded after a completed browser download.
+3. Passes the fresh ZIP to the reusable OpenClash workflow as an artifact.
+4. Generates `config.yaml`, tests the converter, and validates the YAML using the current stable Mihomo core.
+5. Creates checksums and release notes, uploads the assets to a draft release, then publishes it as the latest release.
 
-After successful execution:
+Each successful run creates a release tagged `configs-RUN_ID-RUN_ATTEMPT`. Generated files are published to releases instead of being committed back to the branch. The existing checked-in ZIP remains available as an initial input for manual generation.
 
-- `ProtonVPN_WireGuard_Configs.zip` will be generated
-- It will be:
-  - Committed or stored as an artifact in your repository
-  - Automatically sent to your Telegram bot (if configured)
+`download_scope: all` visits all country sections; `first` visits only the first country shown by ProtonVPN. The downloader includes files it successfully retrieves, so the release summary is the authoritative inventory. The existing throttling uses 60–90 seconds between downloads, up to 20 downloads per browser session, and up to 20 sessions. A failed login, empty download, session limit, validation failure, or job timeout prevents a new release.
 
-Download the ZIP, extract it, and import the `.conf` files into your WireGuard client.
+### Generate OpenClash and Publish Release
 
----
+Workflow file: `.github/workflows/openclash_release.yml`.
 
-# 🛡️ ProtonVPN WireGuard Config Auto-Fetcher
+Called automatically after a successful download. It can also run manually without ProtonVPN credentials or another login:
 
-This project provides an automated solution using Python/Selenium and GitHub Actions to regularly fetch and update the latest **WireGuard** configuration files from a ProtonVPN account.
+- **`latest-release`**: read `ProtonVPN_WireGuard_Configs.zip` from the latest published release. This requires an existing release containing that asset.
+- **`repository`**: read the ZIP stored in the selected branch. Use this to publish the first release or rebuild the supplied archive.
 
-The downloaded configurations are automatically updated in this repository and are pushed to the corresponding Telegram channel for immediate access.
+Both modes generate the OpenClash configuration and include that same WireGuard ZIP in the new release. To refresh the original configs, run the download workflow instead.
 
-# 📢 Telegram Channel
+### Test OpenClash Generator
 
-All final results are automatically compressed into a ZIP file and uploaded to our Telegram channel:
+Workflow file: `.github/workflows/test.yml`.
 
-🔹 **Main Channel:** [DeltaKroneckerFreedom](https://t.me/GitKroneckerDelta)  
+Runs converter tests on relevant pushes and pull requests. It does not log in to ProtonVPN or publish a release.
 
----
+## OpenClash usage
 
-## 💻 Usage Guide (Windows Focus)
+1. Install or select the **Mihomo / Clash Meta** core in OpenClash.
+2. Download `config.yaml` from the latest release and upload it through OpenClash's configuration management page, or configure the release URL as a subscription.
+3. Activate the configuration and open the proxy dashboard.
+4. Choose a group in `PROTONVPN`.
 
-These WireGuard configuration files (`.conf`) are optimized for seamless use in a Windows environment.
+| Group | Behavior |
+| --- | --- |
+| `US Load Balance`, `JP Load Balance`, and other country groups | Distribute connections among servers from that country |
+| `All Countries Load Balance` | Distribute connections among all servers in the input archive |
+| `Manual` | Select one individual WireGuard server |
+| `DIRECT` | Send traffic directly when explicitly selected |
 
-### 📌 Recommended Tool for Optimal Performance (Windows)
+The first alphabetically sorted country group is the initial selection. `store-selected` lets the core retain your selection. Local/private address ranges route directly; other traffic matches `PROTONVPN`. There is no automatic direct fallback for internet traffic. OpenClash may override ports, DNS, and controller settings when applying the file.
 
-For the best performance, stability, and compatibility on Windows, it is **highly recommended** to use the following client instead of the official WireGuard application:
+The default strategy is `consistent-hashing`, which keeps a target on a consistent server. Choose `round-robin` to rotate connections among servers, or `sticky-sessions` to keep a source/target pair on the same server temporarily. Load balancing distributes separate connections; it does not combine VPN bandwidth for one connection. Health checks use `https://www.gstatic.com/generate_204` at a 300-second interval and run lazily when the group is used.
 
-* **Wiresock VPN Client (Recommended)**
-    * **Link:** https://www.wiresock.net
+IPv6 is disabled by default for compatibility. Enable it in the workflow or pass `--ipv6` locally if your router and VPN path support IPv6. WireGuard local IPv6 addresses and allowed ranges are retained in the proxy data; IPv6 DNS answers and global IPv6 routing follow the selected setting.
 
-Wiresock is a robust client that supports the WireGuard protocol, offering superior performance in connection management and traffic handling on Windows systems.
+## Local usage
 
-### ⬇️ Accessing the Config Files:
+Use Python 3.9 or newer. Selenium downloads require Google Chrome / Chromium and a compatible WebDriver; the generator alone only requires PyYAML.
 
-The files are available both on the GitHub repository and through the Telegram channel.
+```bash
+python -m pip install -r requirements.txt
 
-1.  **Download Source:** Choose your preferred method:
-    * **Via GitHub:** Download the file directly from this repository:
-      https://github.com/Delta-Kronecker/ProtonVPN-WireGuard-configuration/raw/refs/heads/main/ProtonVPN_WireGuard_Configs.zip
-    * **Via Telegram:** Download the latest ZIP file uploaded to the channel DeltaKroneckerFreedom.
+# Convert the existing country-organized ZIP.
+python generate_openclash.py \
+  --input ProtonVPN_WireGuard_Configs.zip \
+  --output config.yaml \
+  --summary openclash-summary.json
 
-2.  **Extraction:** Extract the downloaded ZIP file. The files are organized into folders by two-letter country codes (e.g., `US`, `DE`, `NL`).
-3.  **Client Use:**
-    * Ensure the Wiresock client is installed and running.
-    * Import your desired `.conf` files from the country folders into Wiresock and connect.
+# Convert an extracted directory with a different strategy.
+python generate_openclash.py \
+  --input ./wireguard-configs \
+  --output config.yaml \
+  --strategy round-robin \
+  --ipv6
 
-## 🔥 Keep This Project Going!
+# Run converter tests.
+python -m unittest discover -s tests -v
 
-If you're finding this useful, please show your support:
+# Validate with an installed Mihomo core.
+mihomo -t -f config.yaml
+```
 
-⭐ **Star the repository on GitHub**
+The converter supports IPv4 and IPv6 endpoints, multiple peer sections, optional pre-shared keys, DNS addresses, MTU, and persistent keepalive. Multiple peers must have distinct allowed ranges and use the same keepalive value. Country codes come from the immediate parent folder or a filename such as `wg-US-FREE-104.conf`; unrecognized files go into `OTHER Load Balance`. Node names include their relative paths to avoid collisions between countries.
 
-⭐ **Star our [Telegram posts](https://t.me/DeltaKroneckerGithub)** 
+To download locally, set `VPN_USERNAME` and `VPN_PASSWORD` in your environment, then run:
 
-Your stars help keep the project maintained and updated.
+```bash
+python proton_downloader_chrome.py
+```
 
----
+Set `DOWNLOAD_SCOPE=first` for a smaller download. The downloader creates the ZIP and optional WireGuard URI file, then removes its temporary downloads. Run `generate_openclash.py` afterward to create the YAML.
+
+## Configuration privacy
+
+Both `config.yaml` and the `.conf` files contain WireGuard private keys. Publishing them in a public release makes those credentials available to everyone. Use your own ProtonVPN account and a private repository when you need private configuration files. Publicly shared configurations can be rate-limited, revoked, or unstable. GitHub Actions artifacts follow the repository's visibility and expire after seven days in these workflows; release assets remain until you remove them.
+
+## References
+
+- [Mihomo WireGuard configuration](https://wiki.metacubex.one/en/config/proxies/wg/)
+- [Mihomo load-balance groups](https://wiki.metacubex.one/en/config/proxy-groups/load-balance/)
+- [OpenClash project](https://github.com/vernesong/OpenClash)

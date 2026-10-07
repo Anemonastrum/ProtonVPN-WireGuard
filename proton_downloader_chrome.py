@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import random 
 import glob 
@@ -224,6 +225,7 @@ class ProtonVPN:
                             if download_counter >= MAX_DOWNLOADS_PER_SESSION: return False, downloaded_ids
                             
                             btn = row.find_element(By.CSS_SELECTOR, ".button")
+                            previous_files = set(glob.glob(os.path.join(DOWNLOAD_DIR, '*.conf')))
                             
                             random_delay = random.randint(60, 90)
                             
@@ -232,6 +234,12 @@ class ProtonVPN:
                             ActionChains(self.driver).move_to_element(btn).click().perform()
                             WebDriverWait(self.driver, 30).until(EC.element_to_be_clickable(CONFIRM_BUTTON_SELECTOR)).click()
                             WebDriverWait(self.driver, 30).until(EC.invisibility_of_element_located(MODAL_BACKDROP_SELECTOR))
+                            WebDriverWait(self.driver, 60).until(
+                                lambda _: (
+                                    set(glob.glob(os.path.join(DOWNLOAD_DIR, '*.conf'))) - previous_files
+                                    and not glob.glob(os.path.join(DOWNLOAD_DIR, '*.crdownload'))
+                                )
+                            )
                             
                             download_counter += 1
                             print(f"[WG] Downloaded {server_id}. Waiting {random_delay}s...")
@@ -291,8 +299,7 @@ class ProtonVPN:
             wg_files[country_code].append(file_path)
 
         if not wg_files:
-            print("No WireGuard files found.")
-            return
+            raise RuntimeError("No fresh WireGuard files found; refusing to publish an old archive.")
 
         # 2. Create Single ZIP
         total_files = sum(len(v) for v in wg_files.values())
@@ -362,9 +369,12 @@ class ProtonVPN:
             while not wg_done and session < 20: 
                 session += 1
                 self.setup()
-                if self.login(username, password) and self.navigate_to_downloads():
-                    wg_done, wg_ids = self.process_wireguard_downloads(wg_ids)
-                    self.save_downloaded_ids(wg_ids)
+                if not self.login(username, password):
+                    raise RuntimeError("ProtonVPN login failed.")
+                if not self.navigate_to_downloads():
+                    raise RuntimeError("Could not open the ProtonVPN downloads page.")
+                wg_done, wg_ids = self.process_wireguard_downloads(wg_ids)
+                self.save_downloaded_ids(wg_ids)
                 self.logout()
                 self.teardown()
                 
@@ -372,9 +382,13 @@ class ProtonVPN:
                     print(f"Session {session} done. Re-logging in {RELOGIN_DELAY}s...")
                     time.sleep(RELOGIN_DELAY)
             
+            if not wg_done:
+                raise RuntimeError("Download session limit reached before completion.")
             self.organize_and_send_files()
 
-        except Exception as e: print(f"Fatal Error: {e}")
+        except Exception:
+            print("Fatal error: download failed; no new release will be published.")
+            raise
         finally: self.teardown()
 
 if __name__ == "__main__":
@@ -384,3 +398,4 @@ if __name__ == "__main__":
         ProtonVPN().run(U, P)
     else: 
         print("Missing Credentials.")
+        sys.exit(1)

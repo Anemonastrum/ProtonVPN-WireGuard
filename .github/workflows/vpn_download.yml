@@ -1,67 +1,70 @@
+name: Download WireGuard and Publish Release
 
 on:
   workflow_dispatch:
     inputs:
       download_scope:
-        description: 'Scope of download: all countries or only the first country'
-        required: false
-        default: 'all'
+        description: Download all countries or only the first country
         type: choice
-        options:
-          - all
-          - first
+        default: all
+        options: [all, first]
+      strategy:
+        description: Load-balance strategy
+        type: choice
+        default: consistent-hashing
+        options: [consistent-hashing, round-robin, sticky-sessions]
+      ipv6:
+        description: Enable IPv6 in the OpenClash configuration
+        type: boolean
+        default: false
   schedule:
-    - cron: '0 */24 * * *'
+    - cron: '0 0 * * *'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: protonvpn-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  update-vpn-configs:
+  download:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 350
     steps:
-    - uses: actions/checkout@v4
-    
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Download fresh WireGuard configurations
+        env:
+          VPN_USERNAME: ${{ secrets.VPN_USERNAME }}
+          VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DOWNLOAD_SCOPE: ${{ inputs.download_scope || 'all' }}
+        run: |
+          # Never mistake a checked-in archive or checkpoint for a fresh download.
+          rm -f ProtonVPN_WireGuard_Configs.zip proton_wireguard_links.txt downloaded_wg_ids.json
+          python -u proton_downloader_chrome.py
+          test -s ProtonVPN_WireGuard_Configs.zip
+      - name: Pass downloaded archive to the release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-wireguard
+          path: ProtonVPN_WireGuard_Configs.zip
+          if-no-files-found: error
+          retention-days: 7
 
-    - name: Install Dependencies
-      run: pip install selenium requests
-
-    - name: Run Downloader Script
-      env:
-        VPN_USERNAME: ${{ secrets.VPN_USERNAME }}
-        VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        DOWNLOAD_SCOPE: ${{ inputs.download_scope || 'all' }}
-      run: python -u proton_downloader_chrome.py
-
-    - name: Upload Debug Artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: debug
-        path: debug/
-        if-no-files-found: ignore
-
-    - name: Commit and Push Changes
-      if: always()
-      run: |
-        git config --global user.name "GitHub Action Bot"
-        git config --global user.email "action@github.com"
-        
-        if [ -f "ProtonVPN_WireGuard_Configs.zip" ]; then
-          git add ProtonVPN_WireGuard_Configs.zip downloaded_wg_ids.json
-          if [ -f "proton_wireguard_links.txt" ]; then
-            git add proton_wireguard_links.txt
-          fi
-          
-          git commit -m "🔄 Update WireGuard Configs [$(date)]" || echo "No changes to commit"
-          
-          git push
-        else
-          echo "No ZIP file found to upload."
-        fi
+  publish:
+    needs: download
+    permissions:
+      contents: write
+    uses: ./.github/workflows/openclash_release.yml
+    with:
+      input_source: artifact
+      strategy: ${{ inputs.strategy || 'consistent-hashing' }}
+      ipv6: ${{ inputs.ipv6 == true }}

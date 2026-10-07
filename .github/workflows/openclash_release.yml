@@ -1,0 +1,166 @@
+name: Generate OpenClash and Publish Release
+
+on:
+  workflow_call:
+    inputs:
+      input_source:
+        type: string
+        default: artifact
+      strategy:
+        type: string
+        default: consistent-hashing
+      ipv6:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      input_source:
+        description: Build from the latest release ZIP or the ZIP in this branch
+        type: choice
+        default: latest-release
+        options: [latest-release, repository]
+      strategy:
+        description: Load-balance strategy
+        type: choice
+        default: consistent-hashing
+        options: [consistent-hashing, round-robin, sticky-sessions]
+      ipv6:
+        description: Enable IPv6 in the OpenClash configuration
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install generator dependencies
+        run: python -m pip install 'PyYAML>=6.0.2,<7'
+      - name: Test converter
+        run: python -m unittest discover -s tests -v
+      - name: Prepare output directory
+        run: mkdir -p dist
+      - name: Receive freshly downloaded ZIP
+        if: inputs.input_source == 'artifact'
+        uses: actions/download-artifact@v4
+        with:
+          name: downloaded-wireguard
+          path: dist
+      - name: Read input ZIP
+        if: inputs.input_source != 'artifact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_SOURCE: ${{ inputs.input_source }}
+        run: |
+          case "$INPUT_SOURCE" in
+            latest-release)
+              gh release download --pattern ProtonVPN_WireGuard_Configs.zip --dir dist
+              ;;
+            repository)
+              cp ProtonVPN_WireGuard_Configs.zip dist/
+              ;;
+            *)
+              echo "Unsupported input source" >&2
+              exit 1
+              ;;
+          esac
+      - name: Generate config.yaml
+        env:
+          STRATEGY: ${{ inputs.strategy }}
+          ENABLE_IPV6: ${{ inputs.ipv6 }}
+        run: |
+          args=()
+          if [ "$ENABLE_IPV6" = "true" ]; then args+=(--ipv6); fi
+          python generate_openclash.py \
+            --input dist/ProtonVPN_WireGuard_Configs.zip \
+            --output dist/config.yaml \
+            --summary dist/openclash-summary.json \
+            --strategy "$STRATEGY" "${args[@]}"
+      - name: Validate using the current stable Mihomo core
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          core_dir="$(mktemp -d)"
+          core_version="$(gh api repos/MetaCubeX/mihomo/releases/latest --jq .tag_name)"
+          asset="mihomo-linux-amd64-compatible-${core_version}.gz"
+          gh release download "$core_version" --repo MetaCubeX/mihomo \
+            --pattern "$asset" --dir "$core_dir"
+          gzip -d "$core_dir/$asset"
+          chmod +x "$core_dir/${asset%.gz}"
+          "$core_dir/${asset%.gz}" -t -d "$core_dir" -f "$GITHUB_WORKSPACE/dist/config.yaml"
+          echo "Validated with Mihomo ${core_version}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Create checksums and release notes
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          INPUT_SOURCE: ${{ inputs.input_source }}
+        run: |
+          cd dist
+          sha256sum config.yaml ProtonVPN_WireGuard_Configs.zip openclash-summary.json > SHA256SUMS
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          summary = json.loads(Path('openclash-summary.json').read_text())
+          lines = [
+              '# ProtonVPN WireGuard and OpenClash', '',
+              f"Configurations: {summary['total_configs']}",
+              f"Countries: {len(summary['countries'])}",
+              f"Load-balance strategy: {summary['strategy']}",
+              f"IPv6 enabled: {summary['ipv6']}",
+              f"Input source: {os.environ['INPUT_SOURCE']}",
+              f"Source commit: {os.environ['SOURCE_COMMIT']}",
+              f"Workflow: {os.environ['RUN_URL']}", '',
+              '| Country | Configurations |', '| --- | ---: |',
+          ]
+          lines += [f'| {country} | {count} |' for country, count in summary['countries'].items()]
+          lines += ['', 'Assets: `config.yaml`, `ProtonVPN_WireGuard_Configs.zip`, '
+                    '`openclash-summary.json`, and `SHA256SUMS`.', '',
+                    'Use config.yaml with the Mihomo/Clash Meta core. '
+                    'The configuration files contain WireGuard private keys.']
+          notes = '\n'.join(lines) + '\n'
+          Path('release-notes.md').write_text(notes)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write(notes)
+          PY
+      - name: Pass validated assets to publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: validated-release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: validated-release-assets
+          path: dist
+      - name: Publish release with OpenClash and WireGuard assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          tag="configs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Upload to a draft first so a failed upload cannot become the latest release.
+          gh release create "$tag" --target "$SOURCE_COMMIT" --draft \
+            --title "ProtonVPN configurations ${tag}" \
+            --notes-file dist/release-notes.md
+          gh release upload "$tag" dist/config.yaml dist/ProtonVPN_WireGuard_Configs.zip \
+            dist/openclash-summary.json dist/SHA256SUMS
+          gh release edit "$tag" --draft=false --latest
