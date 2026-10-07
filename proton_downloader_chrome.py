@@ -14,6 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
+from proton_login import ProtonLoginMixin
 
 # --- Constants ---
 MODAL_BACKDROP_SELECTOR = (By.CLASS_NAME, "modal-two-backdrop")
@@ -31,7 +32,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-class ProtonVPN:
+class ProtonVPN(ProtonLoginMixin):
     def __init__(self):
         self.options = webdriver.ChromeOptions()
         self.options.add_argument('--headless')
@@ -84,65 +85,6 @@ class ProtonVPN:
             print(f"Debug artifacts saved to {debug_dir}")
         except Exception as e:
             print(f"Debug save failed: {e}")
-
-    def _get_login_error_text(self):
-        try:
-            selectors = [
-                "[role='alert']",
-                ".text-danger",
-                ".error-message",
-                "[class*='error']",
-                "[class*='alert']",
-            ]
-            for selector in selectors:
-                for el in self.driver.find_elements(By.CSS_SELECTOR, selector):
-                    text = el.text.strip()
-                    if text:
-                        return text[:300]
-            return "none visible"
-        except Exception:
-            return "none visible"
-
-    def _click_submit_button(self):
-        try:
-            self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-        except Exception:
-            self.driver.find_element(By.CSS_SELECTOR, ".button-large").click()
-
-    def login(self, username, password):
-        try:
-            self.driver.get("https://account.protonvpn.com/login")
-            WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.ID, "username"))
-            )
-            time.sleep(1)
-            user_input = self.driver.find_element(By.ID, "username")
-            user_input.click()
-            user_input.send_keys(username)
-            time.sleep(1)
-            self._click_submit_button()
-            time.sleep(2)
-            print(f"After username step URL: {self.driver.current_url}")
-            password_input = WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.ID, "password"))
-            )
-            password_input.click()
-            password_input.send_keys(password)
-            time.sleep(1)
-            self._click_submit_button()
-            time.sleep(3)
-            if "login" in self.driver.current_url.lower():
-                raise Exception(
-                    "Still on login page after submitting credentials. "
-                    f"Page error: {self._get_login_error_text()}"
-                )
-            print("Login Successful.")
-            return True
-        except Exception as e:
-            print(f"Error Login: {e}")
-            print(f"Current URL: {self.driver.current_url}")
-            self.save_debug()
-            return False
 
     def navigate_to_downloads(self):
         try:

@@ -43,6 +43,8 @@ jobs:
         env:
           VPN_USERNAME: ${{ secrets.VPN_USERNAME }}
           VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
+          VPN_TOTP_SECRET: ${{ secrets.VPN_TOTP_SECRET }}
+          LOGIN_TIMEOUT_SECONDS: ${{ vars.LOGIN_TIMEOUT_SECONDS || '120' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DOWNLOAD_SCOPE: ${{ inputs.download_scope || 'all' }}
@@ -51,6 +53,14 @@ jobs:
           rm -f ProtonVPN_WireGuard_Configs.zip proton_wireguard_links.txt downloaded_wg_ids.json
           python -u proton_downloader_chrome.py
           test -s ProtonVPN_WireGuard_Configs.zip
+      - name: Upload sanitized login diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-status
+          path: debug/login-status.json
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Pass downloaded archive to the release job
         uses: actions/upload-artifact@v4
         with:
